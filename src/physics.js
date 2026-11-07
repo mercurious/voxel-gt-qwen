@@ -23,7 +23,7 @@ export function makeRacer(car, T, slot, isPlayer) {
     h: Math.atan2(T.S.tz[i], T.S.tx[i]),
     vx: 0, vz: 0, speed: 0, slip: 0,
     idx: i, prog: i, lap: 0, prevLapDone: 0,
-    lapStart: 0, laps: [], best: Infinity,
+    lapStart: 0, lapProgBase: i, laps: [], best: Infinity,
     finished: false, finishTime: 0,
     offroad: false, hitT: -9,
     laneOff: (isPlayer ? 0 : (slot % 3 - 1) * (T.halfW * 0.34)),
@@ -106,16 +106,22 @@ export function stepCar(c, inp, T, dt, tNow) {
   const gh = T.heightAt(c.x, c.z, c.y, ni);
   c.y += (gh - c.y) * Math.min(1, dt * 10);
 
+  // The grid sits just behind the line, so the first crossing STARTS lap 1
+  // rather than completing one: only count laps with (nearly) a full lap of
+  // progress since the last counted crossing.
   const lapDone = Math.floor(c.prog / T.N);
-  if (lapDone > c.prevLapDone && c.prog > T.N * 0.35) {
-    c.laps.push(tNow - c.lapStart);
-    if (tNow - c.lapStart < c.best) c.best = tNow - c.lapStart;
-    c.lapStart = tNow;
-    c.prevLapDone = lapDone;
-    c.lap = lapDone;
-    return true;
+  if (lapDone > c.prevLapDone) {
+    if (c.prog - c.lapProgBase >= T.N * 0.85) {
+      c.laps.push(tNow - c.lapStart);
+      if (tNow - c.lapStart < c.best) c.best = tNow - c.lapStart;
+      c.lapStart = tNow;
+      c.lapProgBase = c.prog;
+      c.lap = c.laps.length;
+      c.prevLapDone = lapDone;
+      return true;
+    }
+    c.prevLapDone = lapDone; // crossed before race proper
   }
-  if (lapDone > c.prevLapDone) c.prevLapDone = lapDone; // crossed before race proper
   return false;
 }
 
