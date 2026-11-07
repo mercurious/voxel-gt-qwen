@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>VOXEL GT</title>
+<style>
+  :root{
+    --red:#e03a2f; --gold:#e8b83a; --ink:#0b0e13; --panel:#131822ee; --line:#2a3342;
+    --txt:#dfe6ef; --dim:#8a96a8; --mono:ui-monospace,'Cascadia Mono',Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{width:100%;height:100%;overflow:hidden;background:var(--ink);
+    font-family:var(--mono);color:var(--txt)}
+  #game{position:fixed;inset:0;width:100%;height:100%;display:block}
+
+  /* ---------- HUD ---------- */
+  #hud{position:fixed;inset:0;pointer-events:none;display:none}
+  #hud.on{display:block}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:6px}
+  #speedo{position:absolute;right:22px;bottom:18px;text-align:right;padding:10px 16px;min-width:190px}
+  #speedo .kmh{font-size:44px;font-weight:700;letter-spacing:1px}
+  #speedo .unit{font-size:12px;color:var(--dim);margin-left:4px}
+  #speedo .gear{font-size:20px;color:var(--gold);margin-top:2px}
+  #tacho{display:block;margin-top:6px;width:100%;height:8px;background:#222a36;border-radius:4px;overflow:hidden}
+  #tacho i{display:block;height:100%;width:0%;background:linear-gradient(90deg,#3fae5a,#e8b83a 62%,var(--red) 88%)}
+  #timing{position:absolute;left:22px;top:18px;padding:10px 14px;font-size:13px;line-height:1.55;min-width:250px}
+  #timing .pos{font-size:26px;font-weight:700}
+  #timing .lap{color:var(--gold)}
+  #timing .best{color:var(--dim)}
+  #map{position:absolute;right:22px;top:18px;width:170px;height:150px;padding:6px}
+  #mapc{width:100%;height:100%;display:block}
+  #bigmsg{position:absolute;left:50%;top:30%;transform:translate(-50%,-50%);
+    font-size:84px;font-weight:800;letter-spacing:4px;color:#fff;
+    text-shadow:0 4px 0 #0008,0 0 40px #000;opacity:0;transition:opacity .15s}
+  #bigmsg.on{opacity:1}
+  #hint{position:absolute;left:50%;bottom:14px;transform:translateX(-50%);font-size:11px;color:var(--dim)}
+  /* audio status chip: shows real AudioContext state; click = unlock + test beep */
+  #aud{position:fixed;left:14px;bottom:10px;z-index:50;font-size:10px;padding:3px 8px;
+    border:1px solid var(--line);border-radius:4px;background:#131822cc;color:var(--dim);
+    cursor:pointer;user-select:none}
+  #aud.ok{color:#7fd07f;border-color:#2e5a34}
+  #aud.warn{color:#e0b04f;border-color:#6a5a2a}
+  #aud.err{color:#e07f7f;border-color:#6a2a2a}
+
+  /* ---------- menus ---------- */
+  #ui{position:fixed;inset:0;display:none}
+  #ui.on{display:block}
+  #brand{position:absolute;left:50%;top:12%;transform:translateX(-50%);text-align:center}
+  #brand h1{font-size:74px;font-weight:800;letter-spacing:6px;color:#fff;
+    text-shadow:0 5px 0 var(--red),0 10px 30px #000}
+  #brand .sub{color:var(--gold);letter-spacing:8px;margin-top:6px;font-size:14px}
+
+  .menu{position:absolute;inset:0;display:none}
+  .menu.on{display:block}
+
+  /* title */
+  #menuTitle{pointer-events:none}
+  #titleOpts{position:absolute;left:50%;top:46%;transform:translateX(-50%);text-align:center}
+  .bignum{font-size:16px;line-height:2.1;color:var(--dim)}
+  .bignum b{color:#fff}
+  #titleOpts .big{display:inline-block;margin-top:22px;padding:14px 42px;font-size:20px;font-weight:700;
+    color:#fff;background:var(--red);border-radius:6px;box-shadow:0 6px 0 #8e1f18;letter-spacing:2px}
+
+  .hdr{position:absolute;left:0;right:0;top:0;padding:14px 26px;font-size:13px;color:var(--dim);
+    display:flex;justify-content:space-between;align-items:center}
+  .hdr b{color:#fff;font-size:15px}
+  .hdr .sel{color:var(--gold)}
+
+  /* car select */
+  #carInfo{position:absolute;left:26px;top:80px;bottom:110px;width:360px;padding:16px 18px}
+  #carInfo h2{font-size:24px;color:#fff}
+  #carInfo .insp{font-size:11px;color:var(--dim);margin:4px 0 10px}
+  #carInfo .blurb{font-size:12px;color:var(--txt);margin-bottom:14px;line-height:1.5}
+  .stat{font-size:11px;color:var(--dim);margin:7px 0 3px;letter-spacing:1px}
+  .bar{height:9px;background:#222a36;border-radius:4px;overflow:hidden}
+  .bar i{display:block;height:100%;background:linear-gradient(90deg,#3f79ae,var(--gold))}
+  #carStrip{position:absolute;left:0;right:0;bottom:0;height:96px;display:flex;gap:10px;
+    align-items:center;justify-content:center}
+  .carChip{width:150px;height:78px;padding:8px;border:2px solid var(--line);border-radius:8px;
+    text-align:center;background:var(--panel)}
+  .carChip.on{border-color:var(--gold);box-shadow:0 0 18px #e8b83a44}
+  .carChip .sw{height:10px;border-radius:3px;margin-bottom:6px}
+  .carChip .nm{font-size:11px;font-weight:700;color:#fff}
+  .carChip .br{font-size:9px;color:var(--dim)}
+
+  /* track select */
+  #trackStrip{position:absolute;inset:20% 5% 18%;display:flex;gap:16px;justify-content:center;align-items:stretch;
+    pointer-events:none}
+  .trackCard{width:300px;padding:16px;background:var(--panel);border:2px solid var(--line);border-radius:10px}
+  .trackCard.on{border-color:var(--gold)}
+  .trackCard h3{font-size:17px;color:#fff}
+  .trackCard .insp{font-size:10px;color:var(--dim);margin:3px 0 8px}
+  .trackCard .facts{font-size:11px;line-height:1.7;color:var(--txt)}
+  .trackCard .facts span{color:var(--gold)}
+
+  /* mode + actions */
+  #selActions{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);display:flex;gap:14px}
+  .btn{padding:10px 22px;border-radius:6px;font-family:var(--mono);font-size:14px;font-weight:700;
+    color:var(--txt);background:#1c2430;border:1px solid var(--line);cursor:pointer;pointer-events:auto}
+  .btn.on{background:var(--gold);color:#111;border-color:var(--gold)}
+  .btn.go{background:var(--red);color:#fff;border-color:var(--red);box-shadow:0 4px 0 #8e1f18}
+
+  /* results */
+  #menuResult{background:#0b0e1399}
+  #resultBox{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);
+    width:480px;padding:22px 26px;background:var(--panel);border:1px solid var(--line);border-radius:10px}
+  #resultBox h2{color:#fff;font-size:22px;margin-bottom:12px}
+  #resultRows{font-size:13px;line-height:2;margin-bottom:14px}
+  #resultRows .p1{color:var(--gold)}
+  #resultBox .row{display:flex;justify-content:space-between}
+  #resultBtns{display:flex;gap:12px}
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+
+<div id="hud">
+  <div id="timing" class="panel">
+    <span class="pos" id="posTxt">P1/1</span> &nbsp; <span class="lap" id="lapTxt">LAP 1/3</span><br>
+    <span id="curLap">0:00.000</span><br>
+    <span class="best" id="bestTxt">BEST --:--.---</span>
+  </div>
+  <div id="map" class="panel"><canvas id="mapc" width="160" height="128"></canvas></div>
+  <div id="speedo" class="panel">
+    <span class="kmh" id="kmh">0</span><span class="unit">km/h</span>
+    <div class="gear" id="gear">N</div>
+    <div id="tacho"><i id="tachobar"></i></div>
+  </div>
+  <div id="bigmsg"></div>
+  <div id="hint">W/↑ throttle · S/↓ brake · A/D steer · SPACE handbrake · R reset · C camera · M sound · ESC menu</div>
+</div>
+<div id="aud" title="click: unlock audio + play test beep">♪ audio: checking…</div>
+
+<div id="ui" class="on">
+  <div id="brand"><h1>VOXEL&nbsp;GT</h1><div class="sub">GRAN TURISMO, ONE CUBE AT A TIME</div></div>
+
+  <div class="menu on" id="menuTitle">
+    <div id="titleOpts">
+      <div class="bignum"><b>W A S D</b> or arrow keys to drive · <b>SPACE</b> handbrake<br>
+      <b>R</b> reset to track · <b>C</b> camera · <b>M</b> engine sound · <b>ESC</b> pause menu<br>
+      <span style="font-size:12px">5 cars · 3 circuits · all voxel, all tribute</span></div>
+      <div class="big">PRESS ENTER TO START</div>
+    </div>
+  </div>
+
+  <div class="menu" id="menuCars">
+    <div class="hdr"><span>CAR GARAGE &nbsp; <span class="sel" id="carSelN">1/5</span></span><b>← → choose · ENTER next</b></div>
+    <div id="carInfo" class="panel"></div>
+    <div id="carStrip"></div>
+  </div>
+
+  <div class="menu" id="menuTrack">
+    <div class="hdr"><span>CIRCUITS &nbsp; <span class="sel" id="trkSelN">1/3</span></span><b>← → choose · ENTER next</b></div>
+    <div id="trackStrip"></div>
+    <div id="selActions">
+      <button class="btn on" id="modeRace">RACE · 3 LAPS VS 4</button>
+      <button class="btn" id="modeTT">TIME ATTACK</button>
+      <button class="btn go" id="goBtn">START ▶</button>
+    </div>
+  </div>
+
+  <div class="menu" id="menuResult">
+    <div id="resultBox">
+      <h2 id="resTitle">RACE COMPLETE</h2>
+      <div id="resultRows"></div>
+      <div id="resultBtns">
+        <button class="btn go" id="againBtn">RETRY · ENTER</button>
+        <button class="btn" id="menuBtn">MAIN MENU · ESC</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"./vendor/three.module.js"}}
+</script>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>
