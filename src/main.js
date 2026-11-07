@@ -5,6 +5,7 @@ import { CARS, buildCarMesh } from './cars.js';
 import { Vox, voxMaterial } from './vox.js';
 import { buildTrack, DS } from './trackbuild.js';
 import { makeRacer, stepCar, aiInput, collideCars, resetToTrack } from './physics.js';
+import { quantizeFrame, decodeRec, playGhost, ghostDelta, arcPos } from './ghost.js';
 
 const $ = id => document.getElementById(id);
 const clamp = (v, a, b) => v < a ? a : v > b ? b : v;
@@ -235,17 +236,6 @@ const MUSIC = {
 // derived from progress: "when did the ghost pass where you are now?".
 // Quantized ints keep localStorage small (positions 6.25cm, heading ~0.35°).
 const recs = new Array(tracks.length).fill(undefined); // undefined = not loaded yet
-function decodeRec(o) {
-  const f = o.f, n = (f.length / 5) | 0;
-  const xs = new Float32Array(n), ys = new Float32Array(n), zs = new Float32Array(n),
-    hs = new Float32Array(n), progs = new Float32Array(n);
-  for (let k = 0; k < n; k++) {
-    const j = k * 5;
-    xs[k] = f[j] / 16; ys[k] = f[j + 1] / 16; zs[k] = f[j + 2] / 16;
-    hs[k] = f[j + 3] / 256; progs[k] = f[j + 4] / 8;
-  }
-  return { lap: o.lap, car: o.car, d: o.d, n, xs, ys, zs, hs, progs };
-}
 function loadRec(i) {
   if (recs[i] !== undefined) return recs[i];
   let r = null;
@@ -452,7 +442,7 @@ function startRace() {
       });
       m.visible = false;
       raceRoot.add(m);
-      ghost = { mesh: m, rec, hint: 0, delta: null };
+      ghost = { mesh: m, rec, delta: null };
     }
   }
 
@@ -562,21 +552,19 @@ function updateRace(dt) {
       const inp = c.isPlayer ? raceInputs() : aiInput(c, T);
       c.steerVis = inp.steer;
       const lapDone = stepCar(c, inp, T, STEP, raceT);
-      if (c.isPlayer && mode === 'tt') // ghost footage: one frame per sim step
-        recF.push(Math.round(c.x * 16), Math.round(c.y * 16), Math.round(c.z * 16),
-          Math.round(c.h * 256), Math.round(c.prog * 8));
+      if (c.isPlayer && mode === 'tt') quantizeFrame(c, recF, T); // ghost footage
       if (lapDone && !c.isPlayer && !c.finished) {
         if (c.lap >= TOTAL_LAPS) { c.finished = true; c.finishTime = raceT; }
       }
       if (lapDone && c.isPlayer) {
-        if (mode === 'tt') checkRecord();
+        const recSet = mode === 'tt' && checkRecord();
         if (c.lap >= TOTAL_LAPS) {
           c.finished = true; c.finishTime = raceT;
           finishRace();
           return;
         } else if (mode === 'race') {
           msg(`LAP ${c.lap} · ${fmt(c.laps[c.laps.length - 1])}`, 1.4);
-        } else {
+        } else if (!recSet) {
           msg(fmt(c.laps[c.laps.length - 1]), 1.4);
         }
       }
@@ -598,42 +586,32 @@ function updateRace(dt) {
     }
   }
 
-  if (ghost) updateGhost();
+  if (ghost) updateGhost(T);
   updateHUD(T);
   updateCamera(dt);
 }
 
 // called the step the player completes a lap in time attack
+// returns true if this lap became the new track record
 function checkRecord() {
   const lapT = player.laps[player.laps.length - 1];
   const old = loadRec(trkSel);
-  if (old && lapT >= old.lap) return;
+  if (old && lapT >= old.lap) return false;
   saveRec(trkSel, { lap: lapT, car: CARS[carSel].id, d: Date.now(), f: recF.slice(0) });
   recBeaten = true;
   msg('NEW TRACK RECORD ' + fmt(lapT), 2);
+  return true;
 }
 
-function updateGhost() {
-  const g = ghost, rec = g.rec, m = g.mesh;
-  // play the stored run against the same raceT clock the player is on
-  const k = Math.min(raceT * 60, rec.n - 1);
-  const i0 = Math.min(rec.n - 2, k | 0), a = Math.min(1, k - i0), i1 = i0 + 1;
-  const lp = (A, B) => A + (B - A) * a;
-  m.position.set(lp(rec.xs[i0], rec.xs[i1]), lp(rec.ys[i0], rec.ys[i1]), lp(rec.zs[i0], rec.zs[i1]));
-  m.rotation.y = -lp(rec.hs[i0], rec.hs[i1]);
-  const spin = Math.hypot(rec.xs[i1] - rec.xs[i0], rec.zs[i1] - rec.zs[i0]) * 60 / 0.42 * (1 / 60);
+function updateGhost(T) {
+  const g = ghost, m = g.mesh;
+  const p = playGhost(g.rec, raceT); // same raceT clock the player is on
+  m.position.set(p.x, p.y, p.z);
+  m.rotation.y = -p.h;
+  const spin = p.speed / 0.42 * (1 / 60);
   for (let w = 0; w < 4; w++) m.userData.wheels[w].rotation.z += spin;
   m.visible = true;
-  // live delta: the ghost's clock time at the player's current progress
-  let h = g.hint;
-  while (h + 1 < rec.n && rec.progs[h + 1] <= player.prog) h++;
-  g.hint = h;
-  if (rec.progs[h] <= player.prog) {
-    let tk = h;
-    if (h + 1 < rec.n)
-      tk = h + (player.prog - rec.progs[h]) / Math.max(1e-6, rec.progs[h + 1] - rec.progs[h]);
-    g.delta = raceT - tk / 60; // >0 = you are behind the record
-  } else g.delta = null;
+  g.delta = ghostDelta(g.rec, arcPos(player, T), raceT).delta; // >0 = behind
 }
 
 function updateHUD(T) {
@@ -782,6 +760,18 @@ function frame(now) {
   }
   renderer.render(scene, cam);
 }
+
+// debug hook: run VGT.debug() in the F12 console to inspect game/record state
+window.VGT = {
+  debug() {
+    const st = { state, mode, trkSel, carSel, ghost: ghost ? 'live' : 'none', localStorage: 'unknown' };
+    try { localStorage.setItem('vgt.probe', '1'); localStorage.removeItem('vgt.probe'); st.localStorage = 'OK'; }
+    catch (e) { st.localStorage = 'BLOCKED: ' + e.name; }
+    st.records = recs.map((_, i) => { const r = loadRec(i); return r ? `${fmt(r.lap)} by ${r.car}` : 'none'; });
+    console.log(st);
+    return st;
+  },
+};
 
 gotoTitle();
 requestAnimationFrame(frame);
