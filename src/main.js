@@ -228,6 +228,42 @@ const MUSIC = {
   },
 };
 
+// ---------- track records & ghosts (time attack) ----------
+// A record is the player's fastest TT lap plus a frame-by-frame replay of the
+// whole run that produced it (grid launch included), sampled every 1/60 s —
+// the same clock raceT runs on, so playback is exact and the live delta can be
+// derived from progress: "when did the ghost pass where you are now?".
+// Quantized ints keep localStorage small (positions 6.25cm, heading ~0.35°).
+const recs = new Array(tracks.length).fill(undefined); // undefined = not loaded yet
+function decodeRec(o) {
+  const f = o.f, n = (f.length / 5) | 0;
+  const xs = new Float32Array(n), ys = new Float32Array(n), zs = new Float32Array(n),
+    hs = new Float32Array(n), progs = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const j = k * 5;
+    xs[k] = f[j] / 16; ys[k] = f[j + 1] / 16; zs[k] = f[j + 2] / 16;
+    hs[k] = f[j + 3] / 256; progs[k] = f[j + 4] / 8;
+  }
+  return { lap: o.lap, car: o.car, d: o.d, n, xs, ys, zs, hs, progs };
+}
+function loadRec(i) {
+  if (recs[i] !== undefined) return recs[i];
+  let r = null;
+  try {
+    const s = localStorage.getItem('vgt.rec.' + i);
+    if (s) { const o = JSON.parse(s); if (o && Array.isArray(o.f) && o.f.length >= 15 && isFinite(o.lap)) r = decodeRec(o); }
+  } catch (e) { /* private mode / bad data: records just don't exist */ }
+  recs[i] = r;
+  return r;
+}
+function saveRec(i, raw) {
+  try {
+    if (raw) localStorage.setItem('vgt.rec.' + i, JSON.stringify(raw));
+    else localStorage.removeItem('vgt.rec.' + i);
+  } catch (e) { console.warn('record not saved (quota?)', e); }
+  recs[i] = raw ? decodeRec(raw) : null;
+}
+
 // ---------- input ----------
 const keys = {};
 addEventListener('keydown', e => {
@@ -244,6 +280,7 @@ let carSel = 0, trkSel = 0, mode = 'race';
 let viewRoot = null;
 let racers = [], player = null, raceRoot = null;
 let raceT = 0, countdownT = 0, camMode = 0, bigTimer = 0;
+let ghost = null, recF = [], recBeaten = false;
 const TOTAL_LAPS = 3;
 const camPos = new THREE.Vector3(0, 30, 80);
 const camLook = new THREE.Vector3();
@@ -337,8 +374,14 @@ function buildTrackStrip() {
   tracks.forEach((T, i) => {
     const d = document.createElement('div');
     d.className = 'trackCard';
+    const rec = loadRec(i);
+    const car = rec && CARS.find(c => c.id === rec.car);
+    const recTxt = rec
+      ? `RECORD <span>${fmt(rec.lap)}</span> · ${car ? car.name : '?'} · ${new Date(rec.d).toISOString().slice(0, 10)}`
+      : 'RECORD <span>— none yet</span>';
     d.innerHTML = `<h3>${T.def.name}</h3><div class="insp">${T.def.insp}</div>` +
-      `<div class="facts">${trackFacts(T)}</div><div class="insp" style="margin-top:8px">${T.def.blurb}</div>`;
+      `<div class="facts">${trackFacts(T)}</div><div class="insp" style="margin-top:8px">${T.def.blurb}</div>` +
+      `<div class="facts" style="margin-top:8px">${recTxt}</div>`;
     strip.appendChild(d);
   });
 }
@@ -347,6 +390,7 @@ function fillTrackMenu() {
   document.querySelectorAll('.trackCard').forEach((el, i) => el.classList.toggle('on', i === trkSel));
   $('modeRace').classList.toggle('on', mode === 'race');
   $('modeTT').classList.toggle('on', mode === 'tt');
+  $('clearRec').style.display = (mode === 'tt' && loadRec(trkSel)) ? '' : 'none';
 }
 buildCarStrip();
 buildTrackStrip();
@@ -355,6 +399,11 @@ fillTrackMenu();
 
 $('modeRace').addEventListener('click', () => { mode = 'race'; fillTrackMenu(); });
 $('modeTT').addEventListener('click', () => { mode = 'tt'; fillTrackMenu(); });
+$('clearRec').addEventListener('click', () => {
+  saveRec(trkSel, null);
+  buildTrackStrip(); fillTrackMenu();
+  msg('RECORD CLEARED', 1.4);
+});
 $('goBtn').addEventListener('click', startRace);
 $('againBtn').addEventListener('click', startRace);
 $('menuBtn').addEventListener('click', gotoTitle);
@@ -387,6 +436,26 @@ function startRace() {
     racers.push(c);
   }
 
+  // time-attack ghost: a translucent replay of the saved record run
+  ghost = null; recF = []; recBeaten = false;
+  if (mode === 'tt') {
+    const rec = loadRec(trkSel);
+    if (rec) {
+      const gd = CARS.find(c => c.id === rec.car) || CARS[carSel];
+      const m = buildCarMesh(gd);
+      m.traverse(o => {
+        if (o.isMesh) {
+          const mt = o.material.clone();
+          mt.transparent = true; mt.opacity = 0.35; mt.depthWrite = false;
+          o.material = mt;
+        }
+      });
+      m.visible = false;
+      raceRoot.add(m);
+      ghost = { mesh: m, rec, hint: 0, delta: null };
+    }
+  }
+
   raceT = 0; countdownT = 0;
   state = 'countdown';
   showMenu(null);
@@ -403,9 +472,11 @@ function finishRace() {
   const T = tracks[trkSel];
   const rows = [];
   if (mode === 'tt') {
-    $('resTitle').textContent = `TIME ATTACK — ${T.def.name}`;
+    $('resTitle').textContent = recBeaten ? `NEW RECORD — ${T.def.name}` : `TIME ATTACK — ${T.def.name}`;
     player.laps.forEach((l, i) => rows.push(`<div class="row"><span>LAP ${i + 1}</span><span>${fmt(l)}</span></div>`));
     rows.push(`<div class="row"><span class="p1">BEST LAP</span><span class="p1">${fmt(player.best)}</span></div>`);
+    const rec = loadRec(trkSel);
+    if (rec) rows.push(`<div class="row"><span>TRACK RECORD</span><span>${fmt(rec.lap)}</span></div>`);
     $('resultRows').innerHTML = rows.join('');
   } else {
     const order = [...racers].sort((a, b) => {
@@ -491,10 +562,14 @@ function updateRace(dt) {
       const inp = c.isPlayer ? raceInputs() : aiInput(c, T);
       c.steerVis = inp.steer;
       const lapDone = stepCar(c, inp, T, STEP, raceT);
+      if (c.isPlayer && mode === 'tt') // ghost footage: one frame per sim step
+        recF.push(Math.round(c.x * 16), Math.round(c.y * 16), Math.round(c.z * 16),
+          Math.round(c.h * 256), Math.round(c.prog * 8));
       if (lapDone && !c.isPlayer && !c.finished) {
         if (c.lap >= TOTAL_LAPS) { c.finished = true; c.finishTime = raceT; }
       }
       if (lapDone && c.isPlayer) {
+        if (mode === 'tt') checkRecord();
         if (c.lap >= TOTAL_LAPS) {
           c.finished = true; c.finishTime = raceT;
           finishRace();
@@ -523,8 +598,42 @@ function updateRace(dt) {
     }
   }
 
+  if (ghost) updateGhost();
   updateHUD(T);
   updateCamera(dt);
+}
+
+// called the step the player completes a lap in time attack
+function checkRecord() {
+  const lapT = player.laps[player.laps.length - 1];
+  const old = loadRec(trkSel);
+  if (old && lapT >= old.lap) return;
+  saveRec(trkSel, { lap: lapT, car: CARS[carSel].id, d: Date.now(), f: recF.slice(0) });
+  recBeaten = true;
+  msg('NEW TRACK RECORD ' + fmt(lapT), 2);
+}
+
+function updateGhost() {
+  const g = ghost, rec = g.rec, m = g.mesh;
+  // play the stored run against the same raceT clock the player is on
+  const k = Math.min(raceT * 60, rec.n - 1);
+  const i0 = Math.min(rec.n - 2, k | 0), a = Math.min(1, k - i0), i1 = i0 + 1;
+  const lp = (A, B) => A + (B - A) * a;
+  m.position.set(lp(rec.xs[i0], rec.xs[i1]), lp(rec.ys[i0], rec.ys[i1]), lp(rec.zs[i0], rec.zs[i1]));
+  m.rotation.y = -lp(rec.hs[i0], rec.hs[i1]);
+  const spin = Math.hypot(rec.xs[i1] - rec.xs[i0], rec.zs[i1] - rec.zs[i0]) * 60 / 0.42 * (1 / 60);
+  for (let w = 0; w < 4; w++) m.userData.wheels[w].rotation.z += spin;
+  m.visible = true;
+  // live delta: the ghost's clock time at the player's current progress
+  let h = g.hint;
+  while (h + 1 < rec.n && rec.progs[h + 1] <= player.prog) h++;
+  g.hint = h;
+  if (rec.progs[h] <= player.prog) {
+    let tk = h;
+    if (h + 1 < rec.n)
+      tk = h + (player.prog - rec.progs[h]) / Math.max(1e-6, rec.progs[h + 1] - rec.progs[h]);
+    g.delta = raceT - tk / 60; // >0 = you are behind the record
+  } else g.delta = null;
 }
 
 function updateHUD(T) {
@@ -545,6 +654,16 @@ function updateHUD(T) {
   $('lapTxt').textContent = `LAP ${Math.min(p.lap + 1, TOTAL_LAPS)}/${TOTAL_LAPS}`;
   $('curLap').textContent = fmt(raceT - p.lapStart);
   $('bestTxt').textContent = `BEST ${fmt(p.best)}`;
+  const dEl = $('deltaTxt');
+  if (mode === 'tt' && ghost) {
+    const d = ghost.delta;
+    dEl.textContent = d == null ? '' :
+      'DELTA ' + (d >= 0 ? '+' : '−') + (Math.abs(d) < 60 ? Math.abs(d).toFixed(3) : fmt(Math.abs(d)));
+    dEl.className = 'ghostline ' + (d == null ? '' : d >= 0 ? 'behind' : 'ahead');
+  } else if (mode === 'tt') {
+    dEl.textContent = 'NO RECORD — DRIVE A CLEAN LAP';
+    dEl.className = 'ghostline';
+  } else { dEl.textContent = ''; dEl.className = 'ghostline'; }
   SFX.update(p.speed < 1 ? 0.12 : 0.12 + frac * 0.85, keys.w || keys.arrowup ? 1 : 0, p.slip, true);
   drawMap(T, order);
 }
@@ -567,6 +686,10 @@ function drawMap(T, order) {
     if (c === player) continue;
     g.fillStyle = '#9aa6b8';
     g.fillRect(c.x * M.s + M.ox - 1.5, c.z * M.s + M.oy - 1.5, 3, 3);
+  }
+  if (ghost && ghost.mesh.visible) {
+    g.fillStyle = '#5fd0e0';
+    g.fillRect(ghost.mesh.position.x * M.s + M.ox - 1.5, ghost.mesh.position.z * M.s + M.oy - 1.5, 3, 3);
   }
   g.fillStyle = '#e8b83a';
   g.beginPath();
